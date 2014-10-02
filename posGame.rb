@@ -25,14 +25,52 @@ class User
 end
 
 class Frequency
-  attr_accessor :total,:totalByTag,:frequencyByTag,:sentences
+  attr_accessor :tag,:word,:odds,:total,:totalByTag,:frequencyByTag,:sentencesByTag
 
   def initialize
     @frequencyByTag = Hash.new("FrequencyByTag")
     @totalByTag = Hash.new("TotalByTag")
-    @sentences = Array.new
+    @sentencesByTag = Hash.new("SentencesByTag")
   end
 end
+
+def findOdds(words, start, odds)
+
+  index = start
+  done = false
+
+  if (odds < 0.01)
+    odds = 0.01
+  elsif (odds > 0.99)
+    odds = 0.99
+  end
+
+  # binary search
+  while (done == false)
+
+    if (words[index].odds == odds) # what are the odds!
+      done = true
+    elsif ((index == 0) && (words[index].odds > odds))
+      done = true
+    elsif ((index == words.size-1) && (words[index].odds < odds))
+      done = true
+    elsif ((words[index].odds > odds) && (words[index-1].odds < odds))
+      index -= 1
+      done = true
+    elsif ((words[index].odds < odds) && (words[index+1].odds > odds))
+      index += 1
+      done = true
+    elsif (words[index].odds > odds)
+      index -= 1
+    elsif (words[index].odds < odds)
+      index += 1
+    end
+  end
+
+  return index
+end
+
+# START MAIN
 
 if (ARGV.size < 2)
   exit
@@ -84,36 +122,38 @@ while (line = taggedFileObj.gets)
 
       if (partsOfSpeech.has_key?(tag))
         tag = partsOfSpeech[tag]
-      end
 
-      if (words.has_key?(word))
-      
-        words[word].total += 1;
-
-        if (words[word].totalByTag.has_key?(tag))
-
-          words[word].totalByTag[tag] += 1
+        if (words.has_key?(word))
           
-        else
-
-          words[word].totalByTag[tag] = 1
-
-        end
+          words[word].total += 1;
+          
+          if (words[word].totalByTag.has_key?(tag))
+            
+            words[word].totalByTag[tag] += 1
+            
+          else
+            
+            words[word].totalByTag[tag] = 1
+            
+          end
   
-      else
-
-        f = Frequency.new
-
-        f.total=1
-
-        f.totalByTag[tag] = 1
-
-        words[word] = f
+        else
+          
+          f = Frequency.new
+          f.total=1          
+          f.totalByTag[tag] = 1         
+          words[word] = f
+          
+        end
+        
+        if (words[word].sentencesByTag.has_key?(tag))
+          words[word].sentencesByTag[tag].push(sentenceIndex)
+        else
+          words[word].sentencesByTag[tag] = Array.new
+          words[word].sentencesByTag[tag].push(sentenceIndex)
+        end
 
       end
-
-      words[word].sentences.push(sentenceIndex)
-
     end
   }
 end
@@ -125,9 +165,7 @@ sentencesFileObj = File.new(sentencesFilename, "r")
 sentences = Array.new
 
 while (line = sentencesFileObj.gets)
-
-    sentences.push(line)
-
+    sentences.push(line.strip)
 end
 
 sentencesFileObj.close
@@ -135,68 +173,115 @@ sentencesFileObj.close
 words.each do |key, value|
 #  print "#{key} #{value.total} tags=#{value.totalByTag.size} "
   value.totalByTag.each do |tag, total|
-#    print "#{tag} #{total} "
     value.frequencyByTag[tag] = total.to_f / value.total
+#    print "#{tag} #{value.frequencyByTag[tag]} "
   end
   puts
 end
 
+# build new structure with only words spread over two categories, filter out all non-major parts of speech, sort on odds, double up
+# insert a Frequency object into the array twice - once with the low odds, once with the high odds
+
+ambiguousWords = Array.new
+
+words.each do | key, value |
+
+  if (value.totalByTag.size == 2) # only keep words that have two parts of speech
+
+#    puts "#{value.frequencyByTag.values[0]} #{value.frequencyByTag.values[1]}"
+
+    f1 = value.clone
+    f1.word = key
+    f1.odds = value.frequencyByTag.values[0]
+    f1.tag = value.frequencyByTag.keys[0]
+
+    ambiguousWords.push(f1)
+   
+    # if odds is 0.5, don't double it up!
+ 
+    if (f1.odds != 0.5)
+
+      f2 = value.clone
+      f2.word = key
+      f2.odds = value.frequencyByTag.values[1]
+      f2.tag = value.frequencyByTag.keys[1]
+
+      ambiguousWords.push(f2)
+    end
+      
+#    puts "#{f1.odds} #{f2.odds}"
+
+  end
+end
+
+ambiguousWords.sort! { |a,b| a.odds <=> b.odds }
+
+wordsIndex = ambiguousWords.size / 2
+
+# binary search to find a word with 50/50 odds.  Assumes there is one
+while (ambiguousWords[wordsIndex].odds != 0.5)
+
+    if (ambiguousWords[wordsIndex].odds > 0.5)
+      wordsIndex -= 1
+    else
+      wordsIndex += 1
+    end
+end
+
 user = User.new
 
-# test code to see that user decision-making works
+puts "User level=#{user.level}"
 
-nTrue = 0
+numQuestions = 0
+numCorrect = 0
 
-1.upto(100) { |x|
+# TODO
+# parameters need to be configurable
+# data should be arrays of words mapped to a single odds value.  This way searches are faster and randomization is easier
+# do not reuse Frequency - create a leaner object
 
-  if (user.decide(0.3))
-    nTrue += 1
+# parameters
+oddsIncrement = 0.02       # vary this to affect convergence rate
+targetRate = 0.8
+rateEpsilon = 0.05
+steps = 30
+
+1.upto(steps) { |x|
+
+  tag = ambiguousWords[wordsIndex].tag
+  prange = Random.new
+  whichSentence = prange.rand(ambiguousWords[wordsIndex].sentencesByTag[tag].size) 
+
+  print "Sentence: #{sentences[ambiguousWords[wordsIndex].sentencesByTag[tag][whichSentence]-1]}"
+  puts " ========> What part of speech is <#{ambiguousWords[wordsIndex].word}> #{ambiguousWords[wordsIndex].frequencyByTag.keys[0]} or #{ambiguousWords[wordsIndex].frequencyByTag.keys[1]}?"
+  
+  numQuestions += 1
+
+  if (user.decide(ambiguousWords[wordsIndex].odds))
+    numCorrect += 1
+    puts " ========> User is right"
+  else
+    puts " ========> User is wrong"
   end
+  
+  rate = numCorrect.to_f / numQuestions.to_f
+
+  if (rate < (targetRate - rateEpsilon)) # too hard, raise odds
+    wordsIndex = findOdds(ambiguousWords, wordsIndex, ambiguousWords[wordsIndex].odds + oddsIncrement)
+    print "too hard:   "
+  elsif (rate > (targetRate + rateEpsilon)) # too easy, lower odds
+    wordsIndex = findOdds(ambiguousWords, wordsIndex, ambiguousWords[wordsIndex].odds - oddsIncrement)
+    print "too easy:   "
+  else
+    print "just right: "
+    # if just right, do not repeat questions- shove up or down by 1
+    prange = Random.new
+    wordsIndex += (prange.rand(2)-1)
+  end
+
+  printf("rate=%.2f odds=%.2f\n", rate, ambiguousWords[wordsIndex].odds)
 }
 
-puts "Test user with level=#{user.level} got #{nTrue}/100 questions of 0.3 odds correct"
+exit
 
-# end test code to see that user decision-making works
-
-# this is the algorithm for infering the user level and keeping the user at 20% probability of error
-# the initial hypothesis is that the user is at level 0.5, and the odds for the initial question are generated accordingly.
-# the user level estimate is updated at every iteration, and the odds are updated to keep probability of error at 20%
-
-# initial hypothesis - user level = 0.5
-userLevelEstimate = 0.5  # user level is reversed - 0.1 is smart, 0.9 not so much
-
-# probOfError = (1 - odds) * level = 0.2
-# odds = 1 - 0.2/level
-odds = 1 - (0.2 / userLevelEstimate)
-
-1.upto(50) { |x|
-
-  # p(a|b) = p(b|a) * p(a) / p(b)
-  # user level given they got the question right = p(getting it right | level) * level / p(getting the question right)
-  # user level given they got the question right = 0.2 * 0.5 / odds
-  # user level given they got the question wrong = 0.8 * 0.5 / (1-odds)
-
-  print "level=#{userLevelEstimate} odds=#{odds} "
-
-  if (user.decide(odds)) # too easy
-    userLevelEstimate = 1.0 - (0.8 * (1.0-userLevelEstimate)) / odds
-    puts " right!"
-
-  else                  # too hard
-    userLevelEstimate = 1.0 - (0.2 * (1.0-userLevelEstimate)) / (1-odds)
-    puts " wrong!"
-  end
-
-  if (userLevelEstimate < 0.1)
-    userLevelEstimate = 0.1
-  end
-
-  if (userLevelEstimate > 0.9)
-    userLevelEstimate = 0.9
-  end
-
-  odds = 1 - (0.2 / userLevelEstimate) # set odds such that probability(error) = 20%
-}
-
-puts "level=#{user.level} estimate=#{userLevelEstimate}"
 
